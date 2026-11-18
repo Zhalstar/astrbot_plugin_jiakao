@@ -1,0 +1,24 @@
+{
+  "question_timeout_seconds": {
+    "description": "单题超时时间（秒）",
+    "hint": "超时后公布答案并结束当前题，设置为 0 表示不限制时间。",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 600,
+      "step": 10
+    },
+    "default": 90
+  },
+  "recent_question_count": {
+    "description": "近期题目去重数量",
+    "hint": "每个群在此题数范围内不会重复抽到相同题目。",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 500,
+      "step": 10
+    },
+    "default": 50
+  }
+}
