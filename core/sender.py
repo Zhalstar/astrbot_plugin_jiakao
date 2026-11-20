@@ -7,7 +7,6 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import ActionRow, At, Button, Image, Plain
 from astrbot.api.star import Context
 
-from .config import PluginConfig
 from .models import (
     LeaderboardEntry,
     Participant,
@@ -28,18 +27,15 @@ class QuizSender:
     def __init__(
         self,
         context: Context,
-        config: PluginConfig,
         question_bank: QuestionBank,
     ) -> None:
         """Create a quiz message sender.
 
         Args:
             context: AstrBot context used for proactive timeout messages.
-            config: Normalized plugin configuration.
             question_bank: Repository used to resolve cached question images.
         """
         self.context = context
-        self.cfg = config
         self.question_bank = question_bank
         self._prefetch_tasks: set[asyncio.Task] = set()
 
@@ -102,10 +98,15 @@ class QuizSender:
                 "",
             ]
         )
-        lines.extend(
-            f"{chr(ord('A') + index)}. {option}"
-            for index, option in enumerate(question.options)
+        use_answer_buttons = (
+            event.get_platform_name() == "qq_official"
+            and question.question_type is not QuestionType.MULTIPLE
         )
+        if not (use_answer_buttons and question.question_type is QuestionType.JUDGE):
+            lines.extend(
+                f"{chr(ord('A') + index)}. {option}"
+                for index, option in enumerate(question.options)
+            )
 
         chain = MessageChain([Plain("\n".join(lines))])
         image_path = await self.question_bank.cache_image(question)
@@ -114,10 +115,7 @@ class QuizSender:
         elif question.image_url:
             chain.chain.append(Image.fromURL(question.image_url))
 
-        if (
-            event.get_platform_name() == "qq_official"
-            and question.question_type is not QuestionType.MULTIPLE
-        ):
+        if use_answer_buttons:
             buttons = []
             for index in range(len(question.options)):
                 answer = chr(ord("A") + index)
@@ -138,13 +136,7 @@ class QuizSender:
                         ),
                     )
                 )
-            timeout = self.cfg.question_timeout_seconds
-            chain.chain.append(
-                ActionRow(
-                    buttons=buttons,
-                    action_timeout=float(timeout) if timeout > 0 else None,
-                )
-            )
+            chain.chain.append(ActionRow(buttons=buttons))
 
         await event.send(chain)
 
