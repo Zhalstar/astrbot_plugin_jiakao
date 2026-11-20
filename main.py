@@ -197,14 +197,14 @@ class JiakaoPlugin(Star):
         if result.status is AnswerStatus.INVALID:
             return
         if result.status is AnswerStatus.ALREADY_ANSWERED:
-            await self.sender.send_text(
-                event, f"{participant.name}，每道题只能作答一次"
+            await self.sender.send_participant_text(
+                event, participant, "，每道题只能作答一次"
             )
             event.stop_event()
             return
         if result.status is AnswerStatus.WRONG:
-            await self.sender.send_text(
-                event, f"{participant.name} 回答错误，本题不能再次作答"
+            await self.sender.send_participant_text(
+                event, participant, " 回答错误，本题不能再次作答"
             )
             event.stop_event()
             return
@@ -231,7 +231,7 @@ class JiakaoPlugin(Star):
         )
         await self.sender.send_reveal(
             event,
-            f"{participant.name} 回答正确！{streak}",
+            f"回答正确！{streak}".rstrip(),
             reveal,
         )
         if result.next_question is not None:
