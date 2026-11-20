@@ -138,6 +138,18 @@ class QuizSender:
                 )
             chain.chain.append(ActionRow(buttons=buttons))
 
+        if (
+            event.get_platform_name() == "qq_official"
+            and event.is_button_interaction()
+            and question.image_url
+        ):
+            sent = await self.context.send_message(event.unified_msg_origin, chain)
+            if sent:
+                return
+            logger.warning(
+                "Jiakao could not route an image question after a QQ Official "
+                "button interaction; falling back to the interaction reply"
+            )
         await event.send(chain)
 
     async def send_reveal(
