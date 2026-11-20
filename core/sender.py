@@ -4,12 +4,13 @@ import asyncio
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import ActionRow, Button, Image, Plain
+from astrbot.api.message_components import ActionRow, At, Button, Image, Plain
 from astrbot.api.star import Context
 
 from .config import PluginConfig
 from .models import (
     LeaderboardEntry,
+    Participant,
     Question,
     QuestionType,
     QuestionView,
@@ -120,10 +121,13 @@ class QuizSender:
             buttons = []
             for index in range(len(question.options)):
                 answer = chr(ord("A") + index)
+                label = answer
+                if question.question_type is QuestionType.JUDGE:
+                    label = f"{answer}. {question.options[index]}"[:10]
                 buttons.append(
                     Button(
                         id=f"{self.ANSWER_ACTION_PREFIX}{answer.lower()}",
-                        label=answer,
+                        label=label,
                         style=Button.Style.PRIMARY,
                         action=Button.CallbackAction(
                             data={
@@ -157,7 +161,51 @@ class QuizSender:
             headline: Reveal heading.
             reveal: Answer and optional explanation to render.
         """
-        await event.send(self._reveal_chain(headline, reveal))
+        participant = reveal.participant
+        mention = None
+        participant_name = None
+        if participant is not None:
+            if (
+                event.get_platform_name() == "qq_official"
+                and not event.is_private_chat()
+            ):
+                mention = At(qq=participant.user_id)
+            elif (
+                event.get_platform_name() == "qq_official"
+                and participant.name == participant.user_id
+            ):
+                participant_name = "你"
+            else:
+                participant_name = participant.name
+        await event.send(
+            self._reveal_chain(
+                headline,
+                reveal,
+                mention=mention,
+                participant_name=participant_name,
+            )
+        )
+
+    async def send_participant_text(
+        self,
+        event: AstrMessageEvent,
+        participant: Participant,
+        suffix: str,
+    ) -> None:
+        """Send participant feedback without exposing QQ Official OpenIDs.
+
+        Args:
+            event: Incoming event that determines the reply target.
+            participant: Participant receiving the feedback.
+            suffix: Text appended after the participant identity.
+        """
+        if event.get_platform_name() == "qq_official" and not event.is_private_chat():
+            await event.send(MessageChain([At(qq=participant.user_id), Plain(suffix)]))
+            return
+        name = participant.name
+        if event.get_platform_name() == "qq_official" and name == participant.user_id:
+            name = "你"
+        await self.send_text(event, f"{name}{suffix}")
 
     async def send_leaderboard(
         self,
@@ -170,15 +218,27 @@ class QuizSender:
             event: Incoming event that determines the reply target.
             entries: Ranked leaderboard entries.
         """
-        lines = ["【驾考刷题排行榜】"]
+        chain = MessageChain([Plain("【驾考刷题排行榜】")])
         for index, entry in enumerate(entries, start=1):
             accuracy = entry.correct / entry.total * 100 if entry.total else 0
-            lines.append(
-                f"{index}. {entry.name}  "
-                f"答对 {entry.correct} / {entry.total}  "
-                f"正确率 {accuracy:.0f}%  最佳连对 {entry.best_streak}"
+            chain.chain.append(Plain(f"\n{index}. "))
+            if (
+                event.get_platform_name() == "qq_official"
+                and not event.is_private_chat()
+            ):
+                chain.chain.append(At(qq=entry.user_id))
+            else:
+                name = entry.name
+                if event.get_platform_name() == "qq_official" and name == entry.user_id:
+                    name = "你"
+                chain.chain.append(Plain(name))
+            chain.chain.append(
+                Plain(
+                    f"  答对 {entry.correct} / {entry.total}  "
+                    f"正确率 {accuracy:.0f}%  最佳连对 {entry.best_streak}"
+                )
             )
-        await self.send_text(event, "\n".join(lines))
+        await event.send(chain)
 
     async def send_timeout(self, umo: str, reveal: RevealResult) -> None:
         """Send an asynchronous timeout reveal to a unified message origin.
@@ -199,12 +259,20 @@ class QuizSender:
             logger.exception("Jiakao timeout message delivery failed")
 
     @staticmethod
-    def _reveal_chain(headline: str, reveal: RevealResult) -> MessageChain:
+    def _reveal_chain(
+        headline: str,
+        reveal: RevealResult,
+        *,
+        mention: At | None = None,
+        participant_name: str | None = None,
+    ) -> MessageChain:
         """Build a reveal chain shared by direct and timeout delivery.
 
         Args:
             headline: Reveal heading.
             reveal: Answer and optional explanation to render.
+            mention: Optional platform mention rendered before the headline.
+            participant_name: Optional plain-text participant identity.
 
         Returns:
             Rendered reveal message chain.
@@ -214,7 +282,18 @@ class QuizSender:
         for letter in question.answer:
             option_index = ord(letter) - ord("A")
             answer_options.append(f"{letter}. {question.options[option_index]}")
-        lines = [f"【{headline}】", f"答案：{'；'.join(answer_options)}"]
+        lines = [f"答案：{'；'.join(answer_options)}"]
         if question.explanation:
             lines.append(f"解析：{question.explanation}")
-        return MessageChain([Plain("\n".join(lines))])
+        body = "\n".join(lines)
+        if mention is not None:
+            return MessageChain(
+                [
+                    Plain("【"),
+                    mention,
+                    Plain(f" {headline}】\n{body}"),
+                ]
+            )
+        if participant_name:
+            headline = f"{participant_name} {headline}"
+        return MessageChain([Plain(f"【{headline}】\n{body}")])
