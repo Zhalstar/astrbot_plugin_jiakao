@@ -35,7 +35,7 @@ class JiakaoPlugin(Star):
             self.cfg,
             event_sink=self._handle_quiz_event,
         )
-        self.sender = QuizSender(self.context, self.cfg, self.question_bank)
+        self.sender = QuizSender(self.context, self.question_bank)
 
     async def initialize(self) -> None:
         """Load the cached question bank and persistent leaderboard."""
@@ -167,8 +167,6 @@ class JiakaoPlugin(Star):
         umo = event.unified_msg_origin
         snapshot = await self.quiz_service.snapshot(umo)
         if snapshot is None or snapshot.current_question is None:
-            if question_id is not None:
-                await self.sender.send_text(event, "该答题按钮已失效")
             return
 
         submitted_number = (
@@ -191,8 +189,6 @@ class JiakaoPlugin(Star):
             AnswerStatus.NO_ACTIVE_QUESTION,
             AnswerStatus.STALE_QUESTION,
         }:
-            if question_id is not None:
-                await self.sender.send_text(event, "该答题按钮已失效")
             return
         if result.status is AnswerStatus.INVALID:
             return
