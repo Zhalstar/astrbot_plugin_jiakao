@@ -12,7 +12,7 @@
   },
   "recent_question_count": {
     "description": "近期题目去重数量",
-    "hint": "每个群在此题数范围内不会重复抽到相同题目。",
+    "hint": "每个会话在此题数范围内不会重复抽到相同题目。",
     "type": "int",
     "slider": {
       "min": 0,

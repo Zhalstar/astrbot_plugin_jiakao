@@ -1,8 +1,8 @@
 name: astrbot_plugin_jiakao
 display_name: 驾考刷题
-desc: 在群聊中进行科目一、科目四多人答题
+desc: 在聊天会话中进行科目一、科目四答题
 help: 略
 version: v0.1.0
 author: Zhalslar
 repo: ""
-astrbot_version: ">=4.26.0"
+astrbot_version: ">=4.29.4"

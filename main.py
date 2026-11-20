@@ -1,32 +1,33 @@
 import asyncio
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 from .core.config import PluginConfig
 from .core.models import (
     AnswerStatus,
     Participant,
-    QuestionType,
     QuestionView,
     QuizEvent,
     RevealResult,
     Subject,
 )
+from .core.sender import QuizSender
 from .core.service import QuizService
 from .core.storage import QuestionBank, StatsStore
 
 
 class JiakaoPlugin(Star):
-    """Expose the driving quiz service through AstrBot group commands."""
+    """Expose the driving quiz service through AstrBot chat commands."""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context = context
         self.cfg = PluginConfig(config)
-        self.question_bank = QuestionBank(self.cfg.question_bank_path)
+        self.question_bank = QuestionBank(
+            self.cfg.question_bank_path, self.cfg.image_dir
+        )
         self.stats_store = StatsStore(self.cfg.stats_path)
         self.quiz_service = QuizService(
             self.question_bank,
@@ -34,6 +35,7 @@ class JiakaoPlugin(Star):
             self.cfg,
             event_sink=self._handle_quiz_event,
         )
+        self.sender = QuizSender(self.context, self.cfg, self.question_bank)
 
     async def initialize(self) -> None:
         """Load the cached question bank and persistent leaderboard."""
@@ -43,8 +45,9 @@ class JiakaoPlugin(Star):
     async def terminate(self) -> None:
         """Release service-owned timeout tasks."""
         await self.quiz_service.close()
+        await self.sender.close()
+        await self.question_bank.close()
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.command("驾考")
     async def start_quiz(self, event: AstrMessageEvent, subject: str = "科一"):
         """驾考 科一/科四"""
@@ -57,70 +60,120 @@ class JiakaoPlugin(Star):
             "科目四": Subject.FOUR,
         }.get(subject.strip())
         if selected_subject is None:
-            yield event.plain_result("科目参数仅支持科一或科四")
+            await self.sender.send_text(event, "科目参数仅支持科一或科四")
             return
-        result = await self._start_quiz(event, selected_subject)
-        yield event.chain_result(result.chain)
+        umo = event.unified_msg_origin
+        view = await self.quiz_service.start(umo, selected_subject)
+        await self._publish_question(event, view, headline="驾考刷题开始")
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.command("驾考下一题")
     async def next_question(self, event: AstrMessageEvent):
         """切换到下一题"""
-        view = await self.quiz_service.next_question(event.unified_msg_origin)
+        umo = event.unified_msg_origin
+        view = await self.quiz_service.next_question(umo)
         if view is None:
-            yield event.plain_result("当前没有答题会话")
+            await self.sender.send_text(event, "当前没有答题会话")
             return
-        yield event.chain_result(self._question_chain(view).chain)
+        await self._publish_question(event, view)
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.command("驾考解析")
     async def reveal_answer(self, event: AstrMessageEvent):
         """公布答案和解析"""
-        reveal = await self.quiz_service.reveal(event.unified_msg_origin)
+        umo = event.unified_msg_origin
+        reveal = await self.quiz_service.reveal(umo)
         if reveal is None:
-            yield event.plain_result("当前没有等待作答的题目")
+            await self.sender.send_text(event, "当前没有等待作答的题目")
             return
-        await event.send(self._reveal_chain("已公布本题答案", reveal))
+        await self.sender.send_reveal(event, "已公布本题答案", reveal)
         if reveal.next_question is not None:
             await asyncio.sleep(3)
-            await event.send(self._question_chain(reveal.next_question))
+            await self._publish_question(event, reveal.next_question)
         event.stop_event()
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.command("驾考结束")
     async def stop_quiz(self, event: AstrMessageEvent):
         """结束驾考答题"""
-        stopped = await self.quiz_service.stop(event.unified_msg_origin)
-        message = "本群驾考刷题已结束" if stopped else "当前没有答题会话"
-        yield event.plain_result(message)
+        umo = event.unified_msg_origin
+        stopped = await self.quiz_service.stop(umo)
+        message = "当前会话的驾考刷题已结束" if stopped else "当前没有答题会话"
+        await self.sender.send_text(event, message)
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.command("驾考排行")
     async def show_leaderboard(self, event: AstrMessageEvent):
         """查看驾考排行榜"""
-        entries = await self.quiz_service.leaderboard(event.unified_msg_origin)
+        umo = event.unified_msg_origin
+        entries = await self.quiz_service.leaderboard(umo)
         if not entries:
-            yield event.plain_result("本群还没有答题记录。")
+            await self.sender.send_text(event, "当前会话还没有答题记录。")
             return
+        await self.sender.send_leaderboard(event, entries)
 
-        lines = ["【驾考刷题排行榜】"]
-        for index, entry in enumerate(entries, start=1):
-            accuracy = entry.correct / entry.total * 100 if entry.total else 0
-            lines.append(
-                f"{index}. {entry.name}  "
-                f"答对 {entry.correct} / {entry.total}  "
-                f"正确率 {accuracy:.0f}%  最佳连对 {entry.best_streak}"
-            )
-        yield event.plain_result("\n".join(lines))
-
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @filter.regex(r"^(?:[A-Da-d](?:[\s,，、/+]*[A-Da-d]){0,3}|正确|错误|对|错|√|×)$")
     async def answer_question(self, event: AstrMessageEvent):
-        """Submit a bare group message as an answer to the active question"""
-        scope_id = event.unified_msg_origin
-        snapshot = await self.quiz_service.snapshot(scope_id)
-        if snapshot is None or snapshot.current_question is None:
+        """Submit a bare message as an answer to the active question."""
+        await self._submit_answer(event, event.message_str)
+
+    @filter.button_action()
+    async def answer_button(self, event: AstrMessageEvent) -> None:
+        """Submit a single-choice answer from a portable button callback."""
+        interaction = event.get_button_interaction()
+        if interaction is None or not interaction.action_id.startswith(
+            QuizSender.ANSWER_ACTION_PREFIX
+        ):
             return
+
+        event.stop_event()
+        data = interaction.data
+        if not isinstance(data, dict):
+            await self.sender.send_text(event, "答题按钮数据无效")
+            return
+        question_id = data.get("question_id")
+        question_number = data.get("question_number")
+        answer = data.get("answer")
+        expected_action = f"{QuizSender.ANSWER_ACTION_PREFIX}{str(answer).lower()}"
+        if (
+            not isinstance(question_id, str)
+            or not isinstance(question_number, int)
+            or isinstance(question_number, bool)
+            or answer not in {"A", "B", "C", "D"}
+            or interaction.action_id != expected_action
+        ):
+            await self.sender.send_text(event, "答题按钮数据无效")
+            return
+
+        await self._submit_answer(
+            event,
+            answer,
+            question_number=question_number,
+            question_id=question_id,
+        )
+
+    async def _submit_answer(
+        self,
+        event: AstrMessageEvent,
+        raw_answer: str,
+        *,
+        question_number: int | None = None,
+        question_id: str | None = None,
+    ) -> None:
+        """Submit text or callback input through the shared answer workflow.
+
+        Args:
+            event: Text message or button interaction event.
+            raw_answer: Answer value to normalize and score.
+            question_number: Question number captured by a callback button.
+            question_id: Question ID captured by a callback button.
+        """
+        umo = event.unified_msg_origin
+        snapshot = await self.quiz_service.snapshot(umo)
+        if snapshot is None or snapshot.current_question is None:
+            if question_id is not None:
+                await self.sender.send_text(event, "该答题按钮已失效")
+            return
+
+        submitted_number = (
+            question_number if question_number is not None else snapshot.question_number
+        )
 
         sender_id = str(event.get_sender_id())
         participant = Participant(
@@ -128,23 +181,31 @@ class JiakaoPlugin(Star):
             name=event.get_sender_name() or sender_id,
         )
         result = await self.quiz_service.submit_answer(
-            scope_id,
-            snapshot.question_number,
+            umo,
+            submitted_number,
             participant,
-            event.message_str,
+            raw_answer,
+            expected_question_id=question_id,
         )
         if result.status in {
             AnswerStatus.NO_ACTIVE_QUESTION,
             AnswerStatus.STALE_QUESTION,
-            AnswerStatus.INVALID,
         }:
+            if question_id is not None:
+                await self.sender.send_text(event, "该答题按钮已失效")
+            return
+        if result.status is AnswerStatus.INVALID:
             return
         if result.status is AnswerStatus.ALREADY_ANSWERED:
-            yield event.plain_result(f"{participant.name}，每道题只能作答一次")
+            await self.sender.send_text(
+                event, f"{participant.name}，每道题只能作答一次"
+            )
             event.stop_event()
             return
         if result.status is AnswerStatus.WRONG:
-            yield event.plain_result(f"{participant.name} 回答错误，本题不能再次作答")
+            await self.sender.send_text(
+                event, f"{participant.name} 回答错误，本题不能再次作答"
+            )
             event.stop_event()
             return
 
@@ -168,70 +229,33 @@ class JiakaoPlugin(Star):
             if result.score is not None and result.score.current_streak > 1
             else ""
         )
-        await event.send(
-            self._reveal_chain(f"{participant.name} 回答正确！{streak}", reveal)
+        await self.sender.send_reveal(
+            event,
+            f"{participant.name} 回答正确！{streak}",
+            reveal,
         )
         if result.next_question is not None:
             await asyncio.sleep(1.5)
-            await event.send(self._question_chain(result.next_question))
+            await self._publish_question(event, result.next_question)
         event.stop_event()
 
-    async def _start_quiz(
-        self, event: AstrMessageEvent, subject: Subject
-    ) -> MessageChain:
-        view = await self.quiz_service.start(event.unified_msg_origin, subject)
-        return self._question_chain(view, headline="驾考刷题开始")
+    async def _publish_question(
+        self,
+        event: AstrMessageEvent,
+        view: QuestionView,
+        headline: str | None = None,
+    ) -> None:
+        """Send a question, then activate its timeout and image prefetch.
 
-    def _question_chain(
-        self, view: QuestionView, headline: str | None = None
-    ) -> MessageChain:
-        question = view.question
-        subject_name = "科目一" if question.subject is Subject.ONE else "科目四"
-        type_name = {
-            QuestionType.JUDGE: "判断题",
-            QuestionType.SINGLE: "单选题",
-            QuestionType.MULTIPLE: "多选题",
-        }[question.question_type]
-        lines = []
-        if headline:
-            lines.append(f"【{headline}】")
-        lines.extend(
-            [
-                f"【{subject_name} · 第 {view.number} 题 · {type_name}】",
-                question.text,
-                "",
-            ]
-        )
-        lines.extend(
-            f"{chr(ord('A') + index)}. {option}"
-            for index, option in enumerate(question.options)
-        )
-        chain = MessageChain([Plain("\n".join(lines))])
-        if question.image_url:
-            chain.chain.append(Image.fromURL(question.image_url))
-        return chain
-
-    def _reveal_chain(self, headline: str, reveal: RevealResult) -> MessageChain:
-        question = reveal.question
-        answer_options = []
-        for letter in question.answer:
-            option_index = ord(letter) - ord("A")
-            answer_options.append(f"{letter}. {question.options[option_index]}")
-        lines = [
-            f"【{headline}】",
-            f"答案：{'；'.join(answer_options)}",
-        ]
-        if question.explanation:
-            lines.append(f"解析：{question.explanation}")
-        return MessageChain([Plain("\n".join(lines))])
+        Args:
+            event: Platform event used to send the question.
+            view: Question view selected by the quiz service.
+            headline: Optional heading shown before the question.
+        """
+        await self.sender.send_question(event, view, headline)
+        umo = event.unified_msg_origin
+        next_question = await self.quiz_service.activate_question(umo, view.number)
+        self.sender.prefetch(next_question)
 
     async def _handle_quiz_event(self, event: QuizEvent) -> None:
-        chain = self._reveal_chain("本题超时", event.reveal)
-        try:
-            sent = await self.context.send_message(event.scope_id, chain)
-            if not sent:
-                logger.warning(
-                    f"Jiakao timeout message has no matching platform: {event.scope_id}"
-                )
-        except Exception:
-            logger.exception("Jiakao timeout message delivery failed")
+        await self.sender.send_timeout(event.umo, event.reveal)

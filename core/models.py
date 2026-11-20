@@ -147,7 +147,7 @@ class RevealResult:
 class QuizSnapshot:
     """Current state projection for commands or future web APIs."""
 
-    scope_id: str
+    umo: str
     selected_subject: Subject
     question_number: int
     current_question: Question | None
@@ -158,17 +158,18 @@ class QuizEvent:
     """Asynchronous service event suitable for chat or web adapters."""
 
     event_type: QuizEventType
-    scope_id: str
+    umo: str
     reveal: RevealResult
 
 
 @dataclass(slots=True)
 class QuizSession:
-    """Internal state for one independent quiz scope."""
+    """Internal state for one independent unified message origin."""
 
-    scope_id: str
+    umo: str
     selected_subject: Subject
     question_number: int = 0
     current_question: Question | None = None
+    next_question: Question | None = None
     answered_user_ids: set[str] = field(default_factory=set)
     recent_question_ids: list[str] = field(default_factory=list)

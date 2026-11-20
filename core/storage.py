@@ -32,14 +32,18 @@ IMAGE_BASE_URL = f"{SOURCE_ROOT}/"
 class QuestionBank:
     """Load, validate, and cache the pinned external question bank."""
 
-    def __init__(self, cache_path: Path):
+    def __init__(self, cache_path: Path, image_dir: Path):
         """Create a question-bank repository.
 
         Args:
             cache_path: Plugin-owned path used for the validated JSON cache.
+            image_dir: Plugin-owned directory used for persistent image files.
         """
         self.cache_path = cache_path
+        self.image_dir = image_dir
         self._questions: dict[Subject, tuple[Question, ...]] = {}
+        self._image_locks: dict[str, asyncio.Lock] = {}
+        self._image_session: aiohttp.ClientSession | None = None
 
     async def initialize(self) -> None:
         """Load the cache or download it when no valid cache exists.
@@ -79,6 +83,80 @@ class QuestionBank:
             f"subject 1={len(questions[Subject.ONE])}, "
             f"subject 4={len(questions[Subject.FOUR])}"
         )
+
+    async def cache_image(self, question: Question) -> Path | None:
+        """Return a persistent local copy of a question image when available.
+
+        Args:
+            question: Question whose optional image should be cached.
+
+        Returns:
+            Cached image path, or None when the question has no image or the
+            remote image could not be downloaded.
+        """
+        if not question.image_url:
+            return None
+        if not question.image_url.startswith(IMAGE_BASE_URL):
+            logger.warning(
+                f"Jiakao question {question.question_id} has an unexpected image URL"
+            )
+            return None
+
+        image_path = question.image_url.removeprefix(IMAGE_BASE_URL)
+        relative_path = Path(image_path)
+        if relative_path.parts and relative_path.parts[0] == "images":
+            relative_path = Path(*relative_path.parts[1:])
+        if (
+            not relative_path.parts
+            or relative_path.is_absolute()
+            or ".." in relative_path.parts
+        ):
+            logger.warning(
+                f"Jiakao question {question.question_id} has an unsafe image path"
+            )
+            return None
+
+        cache_path = self.image_dir / relative_path
+        try:
+            if cache_path.is_file() and cache_path.stat().st_size > 0:
+                return cache_path
+        except OSError:
+            pass
+
+        lock = self._image_locks.setdefault(question.image_url, asyncio.Lock())
+        async with lock:
+            try:
+                if cache_path.is_file() and cache_path.stat().st_size > 0:
+                    return cache_path
+
+                if self._image_session is None or self._image_session.closed:
+                    timeout = aiohttp.ClientTimeout(total=60)
+                    self._image_session = aiohttp.ClientSession(timeout=timeout)
+                async with self._image_session.get(question.image_url) as response:
+                    response.raise_for_status()
+                    payload = await response.read()
+                if not payload:
+                    raise ValueError("downloaded image is empty")
+
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = cache_path.with_name(f"{cache_path.name}.tmp")
+                await asyncio.to_thread(temp_path.write_bytes, payload)
+                await asyncio.to_thread(temp_path.replace, cache_path)
+                return cache_path
+            except (aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
+                temp_path = cache_path.with_name(f"{cache_path.name}.tmp")
+                await asyncio.to_thread(temp_path.unlink, missing_ok=True)
+                logger.warning(
+                    f"Unable to cache Jiakao image for question "
+                    f"{question.question_id}: {exc}"
+                )
+                return None
+
+    async def close(self) -> None:
+        """Close the reusable image download session."""
+        if self._image_session is not None:
+            await self._image_session.close()
+            self._image_session = None
 
     def questions_for(self, subject: Subject) -> tuple[Question, ...]:
         """Return questions for one concrete subject.
@@ -186,7 +264,7 @@ class StatsStore:
                 raise ValueError("Score root must be an object")
 
             loaded: dict[str, dict[str, PlayerScore]] = {}
-            for scope_id, raw_players in raw_scopes.items():
+            for umo, raw_players in raw_scopes.items():
                 if not isinstance(raw_players, dict):
                     continue
                 players: dict[str, PlayerScore] = {}
@@ -206,14 +284,14 @@ class StatsStore:
                         )
                     except (TypeError, ValueError):
                         continue
-                loaded[str(scope_id)] = players
+                loaded[str(umo)] = players
             self._scores = loaded
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning(f"Jiakao score data is invalid and will be ignored: {exc}")
 
     async def record(
         self,
-        scope_id: str,
+        umo: str,
         participant: Participant,
         *,
         correct: bool,
@@ -221,14 +299,14 @@ class StatsStore:
         """Record one answer and persist the updated scores.
 
         Args:
-            scope_id: Independent quiz scope.
+            umo: Unified message origin identifying one quiz session.
             participant: User who submitted the answer.
             correct: Whether the submitted answer was correct.
 
         Returns:
             Updated immutable score projection.
         """
-        players = self._scores.setdefault(scope_id, {})
+        players = self._scores.setdefault(umo, {})
         score = players.setdefault(
             participant.user_id,
             PlayerScore(user_id=participant.user_id, name=participant.name),
@@ -244,17 +322,17 @@ class StatsStore:
         await self._save()
         return self._entry(score)
 
-    def leaderboard(self, scope_id: str, limit: int = 10) -> list[LeaderboardEntry]:
+    def leaderboard(self, umo: str, limit: int = 10) -> list[LeaderboardEntry]:
         """Return the highest-ranked participants for a scope.
 
         Args:
-            scope_id: Independent quiz scope.
+            umo: Unified message origin identifying one quiz session.
             limit: Maximum number of entries to return.
 
         Returns:
             Entries ordered by correct answers, accuracy, and best streak.
         """
-        scores = list(self._scores.get(scope_id, {}).values())
+        scores = list(self._scores.get(umo, {}).values())
         scores.sort(
             key=lambda score: (
                 score.correct,
@@ -268,8 +346,8 @@ class StatsStore:
     async def _save(self) -> None:
         """Atomically persist the current in-memory score snapshot."""
         payload = {
-            scope_id: {user_id: asdict(score) for user_id, score in players.items()}
-            for scope_id, players in self._scores.items()
+            umo: {user_id: asdict(score) for user_id, score in players.items()}
+            for umo, players in self._scores.items()
         }
         serialized = json.dumps(payload, ensure_ascii=False, indent=2)
         self.path.parent.mkdir(parents=True, exist_ok=True)

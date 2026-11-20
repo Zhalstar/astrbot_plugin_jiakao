@@ -20,4 +20,5 @@ class PluginConfig:
         self.data_dir = Path(get_astrbot_plugin_data_path()) / self._plugin_name
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.question_bank_path = self.data_dir / "bank.json"
+        self.image_dir = self.data_dir / "images"
         self.stats_path = self.data_dir / "stats.json"
