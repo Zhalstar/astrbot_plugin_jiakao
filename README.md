@@ -4,7 +4,7 @@
 
 # astrbot_plugin_jiakao
 
-_✨ 驾考刷题插件 ✨_  
+_✨ 驾考宝典 ✨_  
 
 [![License](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
@@ -42,8 +42,8 @@ QQ 官方机器人会为判断题和单选题显示回调按钮，可直接点�
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `question_timeout_seconds` | `90` | 单题超时时间，设置为 `0` 表示不限制时间 |
-| `recent_question_count` | `50` | 每个会话避免重复的近期题目数量 |
+| `单题超时时间（秒）` | `90` | 单题超时时间，设置为 `0` 表示不限制时间 |
+| `近期题目去重数量` | `50` | 每个会话避免重复的近期题目数量 |
 
 ### 示例图
 

@@ -1,5 +1,5 @@
 name: astrbot_plugin_jiakao
-display_name: 驾考刷题
+display_name: 驾考宝典
 desc: 在聊天会话中进行科目一、科目四答题
 help: 略
 version: v0.1.0
