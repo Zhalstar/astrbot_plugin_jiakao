@@ -2,7 +2,7 @@ name: astrbot_plugin_jiakao
 display_name: 驾考宝典
 desc: 在聊天会话中进行科目一、科目四答题
 help: 略
-version: v0.1.0
+version: v0.1.1
 author: 饰乐
 repo: https://github.com/Zhalstar/astrbot_plugin_jiakao
 astrbot_version: ">=4.29.4"
